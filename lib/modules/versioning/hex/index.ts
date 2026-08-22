@@ -17,8 +17,14 @@ export const supportedRangeStrategies: RangeStrategy[] = [
 ];
 
 function hex2npm(input: string): string {
+  // Hex frees the last part of a `~>` range, whatever the values, so
+  // `~> 0.22` is `>= 0.22.0 and < 1.0.0`. An npm caret frees only the parts
+  // below the first non-zero one, so `^0.22` is `>= 0.22.0 and < 0.23.0`. The
+  // two agree when the major is not 0. npm has no operator for the range when
+  // the major is 0, so write the interval out.
   return input
-    .replace(regEx(/~>\s*(\d+\.\d+)$/), '^$1')
+    .replace(regEx(/~>\s*0\.(\d+)($|[^\d.])/g), '>=0.$1.0 <1.0.0$2')
+    .replace(regEx(/~>\s*(\d+\.\d+)($|[^\d.])/g), '^$1$2')
     .replace(regEx(/~>\s*(\d+\.\d+\.\d+)/), '~$1')
     .replace(regEx(/==|and/), '')
     .replace('or', '||')
@@ -94,8 +100,22 @@ function getNewValue({
   currentVersion,
   newVersion,
 }: NewValueConfig): string | null {
+  // A range that already allows the new version needs no change. `bump` is
+  // different, because it always raises the lower bound.
+  if (rangeStrategy !== 'bump' && matches(newVersion, currentValue)) {
+    return currentValue;
+  }
+  // `npm.getNewValue` rewrites a caret range, and `npm2hex` turns the result
+  // back into a `~>` range, which the expanded `0.x` form cannot produce. Keep
+  // the caret for the rewrite only. Invariant: this line is reached only when
+  // `newVersion` falls outside the range, so the narrower npm meaning of
+  // `^0.x` cannot change the outcome.
+  const npmRewritableValue = currentValue.replace(
+    regEx(/~>\s*(0\.\d+)($|[^\d.])/g),
+    '^$1$2',
+  );
   let newSemver = npm.getNewValue({
-    currentValue: hex2npm(currentValue),
+    currentValue: hex2npm(npmRewritableValue),
     rangeStrategy,
     currentVersion,
     newVersion,
@@ -108,13 +128,16 @@ function getNewValue({
         regEx(/[\^~]\s*(\d+\.\d+\.\d+)/g),
         (_str, p1: string) => `~> ${p1}`,
       );
-    } else if (regEx(/~>\s*(\d+\.\d+)$/).test(currentValue)) {
+    } else {
+      // Hex has no caret, so a caret in the result is an artifact of the round
+      // trip through npm. Restore `~>` for every one of them.
       newSemver = newSemver.replace(
         regEx(/\^\s*(\d+\.\d+)(\.\d+)?/g),
         (_str, p1: string) => `~> ${p1}`,
       );
-    } else {
-      newSemver = newSemver.replace(regEx(/~\s*(\d+\.\d+\.\d)/g), '~> $1');
+      if (!regEx(/~>\s*(\d+\.\d+)$/).test(currentValue)) {
+        newSemver = newSemver.replace(regEx(/~\s*(\d+\.\d+\.\d)/g), '~> $1');
+      }
     }
     if (npm.isVersion(newSemver)) {
       newSemver = `== ${newSemver}`;
